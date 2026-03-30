@@ -169,7 +169,7 @@ def run_old_api(cap, state):
 # ══════════════════════════════════════════════
 #  NOVA API  (mediapipe >= 0.10)
 # ══════════════════════════════════════════════
-def run_new_api(cap, state):
+def run_new_api(cap, state, palavra, ultima_letra, ultimo_tempo):
     from mediapipe.tasks import python as mp_python
     from mediapipe.tasks.python import vision as mp_vision
     import urllib.request
@@ -215,21 +215,26 @@ def run_new_api(cap, state):
             result = detector.detect(mp_img)
             num_hands = len(result.hand_landmarks) if result.hand_landmarks else 0
 
-            key = cv2.waitKey(1) & 0xFF  # ← captura tecla UMA VEZ
+            key = cv2.waitKey(1) & 0xFF
 
             if result.hand_landmarks:
                 for i, hl in enumerate(result.hand_landmarks):
                     pts = landmarks_to_pts(hl, h, w)
                     draw_hand(frame, pts, state["thickness"], state["debug"])
 
-                    # DETECÇÃO DE GESTO
+                    # 🔥 IA
                     texto = prever_letra(pts)
 
-                    # MOSTRAR TEXTO
+                    # 🔥 MONTAR PALAVRA (CORRIGIDO)
+                    agora = time.time()
+
+                    if texto != "" and texto != ultima_letra[0] and (agora - ultimo_tempo[0] > 1):
+                        palavra.append(texto)
+                        ultima_letra[0] = texto
+                        ultimo_tempo[0] = agora
+
+                    # 🔥 MOSTRAR LETRA (canto direito)
                     if texto:
-                        x, y = pts[0]
-                        # posição fixa (topo da tela)
-                        # posição no canto superior direito
                         pos_x = w - 200
                         pos_y = 80
 
@@ -243,7 +248,7 @@ def run_new_api(cap, state):
                         cat = result.handedness[i][0]
                         draw_label(frame, pts, f"{cat.display_name} ({cat.score:.0%})")
 
-                    # 🔥 COLETA DE DADOS (AGORA CERTO)
+                    # 🔥 COLETA DE DADOS
                     if key == ord("a"):
                         salvar_dados(pts, "A")
                         print("Salvou A")
@@ -256,6 +261,14 @@ def run_new_api(cap, state):
                         salvar_dados(pts, "D")
                         print("Salvou D")
 
+            # 🔥 MOSTRAR PALAVRA COMPLETA
+            texto_palavra = "".join(palavra)
+
+            cv2.rectangle(frame, (30, h-80), (500, h-20), (0,0,0), -1)
+
+            cv2.putText(frame, texto_palavra, (40, h-30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+
             # FPS + HUD
             now = time.time()
             fps = 1.0 / (now - prev_time + 1e-9)
@@ -264,9 +277,21 @@ def run_new_api(cap, state):
             draw_hud(frame, fps, num_hands, state["thickness"], state["debug"])
             cv2.imshow("Hand Tracking", frame)
 
-            # CONTROLES (Q, etc.)
-            if handle_keys(key, state, frame):
-                break
+            # CONTROLES
+            acao = handle_keys(key, state, frame)
+
+            if acao == True:
+                    break
+
+            elif acao == "reset":
+                palavra.clear()
+                ultima_letra[0] = ""
+                print("Palavra apagada")
+
+            elif acao == "delete":
+                if palavra:
+                    palavra.pop()
+                    print("Apagou última letra")
 
 # ══════════════════════════════════════════════
 #  Teclado
@@ -276,19 +301,33 @@ def handle_keys(key, state, frame):
     if key == ord("q"):
         print("Encerrando...")
         return True
+
+    elif key == ord("r"):  # 🔥 NOVO (RESET)
+        return "reset"
+
+    elif key == ord("x"):  # 🔥 NOVO (APAGAR ÚLTIMA)
+        return "delete"
+
     elif key == ord("s"):
         os.makedirs("screenshots", exist_ok=True)
         fn = os.path.join("screenshots", f"hand_{int(time.time())}.png")
         cv2.imwrite(fn, frame)
         print(f"Screenshot salvo: {fn}")
+
     elif key == ord("d"):
         state["debug"] = not state["debug"]
         print(f"Debug: {'ON' if state['debug'] else 'OFF'}")
+
     elif key in (ord("+"), ord("=")):
         state["thickness"] = min(state["thickness"] + 1, 8)
+
     elif key == ord("-"):
         state["thickness"] = max(state["thickness"] - 1, 1)
+
     return False
+
+
+
 
 def is_hand_open(pts):
     fingers = []
@@ -339,7 +378,6 @@ def main():
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("[ERRO] Webcam não encontrada.")
-        print("Verifique se a câmera está conectada (e habilitada na VM).")
         sys.exit(1)
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -347,14 +385,13 @@ def main():
 
     state = {"debug": False, "thickness": 2}
 
-    print("=" * 50)
-    print("  Hand Tracking — MediaPipe + OpenCV")
-    print("  Q=sair | S=screenshot | D=debug | +/-=espessura")
-    print("=" * 50)
+    palavra = []
+    ultima_letra = [""]
+    ultimo_tempo = [0]
 
     try:
         if USE_NEW_API:
-            run_new_api(cap, state)
+            run_new_api(cap, state, palavra, ultima_letra, ultimo_tempo)
         else:
             run_old_api(cap, state)
     finally:
@@ -362,5 +399,6 @@ def main():
         cv2.destroyAllWindows()
 
 
+# 👇 FORA DO MAIN (CORRETO)
 if __name__ == "__main__":
     main()
