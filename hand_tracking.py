@@ -22,8 +22,32 @@ import time
 import os
 import sys
 import joblib
+import urllib.request as _urllib_req
+import json
 
 model = joblib.load("modelo.pkl")
+
+# ── Servidor de desenvolvimento ────────────────
+SERVER_URL = "http://localhost:5000"
+CONFIANCA_MINIMA = 0.80  # 80%
+
+def enviar_palavra(letra, confianca, palavra):
+    try:
+        payload = json.dumps({
+            "letra": letra,
+            "confianca": confianca,
+            "palavra": palavra,
+        }).encode()
+        req = _urllib_req.Request(
+            SERVER_URL,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        _urllib_req.urlopen(req, timeout=0.5)
+    except Exception:
+        pass  # servidor offline não trava o programa
+
 #######################################################
 import csv
 
@@ -140,12 +164,12 @@ def run_old_api(cap, state):
                 draw_hand(frame, pts, state["thickness"], state["debug"])
 
                 # DETECÇÃO DE GESTO
-                texto = prever_letra(pts)
-            
+                texto, confianca = prever_letra(pts)
+
                 # MOSTRAR TEXTO
                 if texto:
                     x, y = pts[0]
-                    cv2.putText(frame, texto, (x, y - 20),
+                    cv2.putText(frame, f"{texto} {confianca:.0%}", (x, y - 20),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
 
                 # LABEL DA MÃO (Left/Right)
@@ -223,7 +247,7 @@ def run_new_api(cap, state, palavra, ultima_letra, ultimo_tempo):
                     draw_hand(frame, pts, state["thickness"], state["debug"])
 
                     # 🔥 IA
-                    texto = prever_letra(pts)
+                    texto, confianca = prever_letra(pts)
 
                     # 🔥 MONTAR PALAVRA (CORRIGIDO)
                     agora = time.time()
@@ -232,6 +256,7 @@ def run_new_api(cap, state, palavra, ultima_letra, ultimo_tempo):
                         palavra.append(texto)
                         ultima_letra[0] = texto
                         ultimo_tempo[0] = agora
+                        enviar_palavra(texto, confianca, "".join(palavra))
 
                     # 🔥 MOSTRAR LETRA (canto direito)
                     if texto:
@@ -240,7 +265,7 @@ def run_new_api(cap, state, palavra, ultima_letra, ultimo_tempo):
 
                         cv2.rectangle(frame, (pos_x-10, pos_y-40), (pos_x+150, pos_y+10), (0,0,0), -1)
 
-                        cv2.putText(frame, texto, (pos_x, pos_y),
+                        cv2.putText(frame, f"{texto} {confianca:.0%}", (pos_x, pos_y),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0,255,0), 3)
 
                     # LABEL (Left/Right)
@@ -360,16 +385,21 @@ def is_index_up(pts):
         pts[20][1] > pts[18][1]
     )
 
-# 👇 FUNÇÃO CORRETA
 def prever_letra(pts):
+    """Retorna (letra, confianca). Retorna ('', 0.0) se abaixo de CONFIANCA_MINIMA."""
     entrada = []
-
     for i in range(21):
         x, y = pts[i]
         entrada.extend([x, y])
 
-    pred = model.predict([entrada])
-    return pred[0]
+    proba = model.predict_proba([entrada])[0]
+    idx = proba.argmax()
+    confianca = proba[idx]
+    letra = model.classes_[idx]
+
+    if confianca < CONFIANCA_MINIMA:
+        return "", 0.0
+    return letra, confianca
 
 # ══════════════════════════════════════════════
 #  MAIN
