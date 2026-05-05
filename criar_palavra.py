@@ -21,23 +21,76 @@ import cv2
 import mediapipe as mp
 import csv
 import os
+import sys
 import time
+import urllib.request
 import joblib
 from sklearn.ensemble import RandomForestClassifier
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision as mp_vision
 
 ARQUIVO_DATASET  = "palavras_dataset.csv"
 ARQUIVO_MODELO   = "modelo_palavras.pkl"
+MODEL_PATH       = "hand_landmarker.task"
 FRAMES_POR_GESTO = 45
 CONTAGEM_SEG     = 3
+
+_CONEXOES = [
+    (0,1),(1,2),(2,3),(3,4),
+    (0,5),(5,6),(6,7),(7,8),
+    (0,9),(9,10),(10,11),(11,12),
+    (0,13),(13,14),(14,15),(15,16),
+    (0,17),(17,18),(18,19),(19,20),
+    (5,9),(9,13),(13,17),
+]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _pts_para_vetor(landmarks, h, w):
+def _garantir_modelo_mp():
+    if not os.path.exists(MODEL_PATH):
+        url = ("https://storage.googleapis.com/mediapipe-models/"
+               "hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task")
+        print(f"Baixando {MODEL_PATH} ...")
+        try:
+            urllib.request.urlretrieve(url, MODEL_PATH)
+            print("Modelo baixado!")
+        except Exception as e:
+            print(f"[ERRO] Falha ao baixar: {e}")
+            sys.exit(1)
+
+
+def _criar_detector():
+    options = mp_vision.HandLandmarkerOptions(
+        base_options=mp_python.BaseOptions(model_asset_path=MODEL_PATH),
+        running_mode=mp_vision.RunningMode.IMAGE,
+        num_hands=1,
+        min_hand_detection_confidence=0.6,
+        min_hand_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+    return mp_vision.HandLandmarker.create_from_options(options)
+
+
+def _landmarks_para_pts(landmarks, h, w):
+    return {i: (int(lm.x * w), int(lm.y * h)) for i, lm in enumerate(landmarks)}
+
+
+def _pts_para_vetor(pts):
     v = []
-    for lm in landmarks:
-        v.extend([int(lm.x * w), int(lm.y * h)])
+    for i in range(21):
+        x, y = pts[i]
+        v.extend([x, y])
     return v
+
+
+def _desenhar_mao(frame, pts):
+    for a, b in _CONEXOES:
+        cv2.line(frame, pts[a], pts[b], (0, 220, 0), 2, cv2.LINE_AA)
+    for idx, (x, y) in pts.items():
+        r = 6 if idx in (4, 8, 12, 16, 20) else 4
+        cv2.circle(frame, (x, y), r, (255, 255, 255), -1, cv2.LINE_AA)
+        cv2.circle(frame, (x, y), r, (80, 80, 80), 1, cv2.LINE_AA)
 
 
 def _overlay_topo(frame, linha1, linha2="", cor1=(255, 255, 0)):
@@ -57,13 +110,23 @@ def _barra_progresso(frame, atual, total):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
 
+def _detectar(detector, frame):
+    """Retorna pts dict ou None."""
+    h, w = frame.shape[:2]
+    mp_img = mp.Image(image_format=mp.ImageFormat.SRGB,
+                      data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    result = detector.detect(mp_img)
+    if result.hand_landmarks:
+        return _landmarks_para_pts(result.hand_landmarks[0], h, w)
+    return None
+
+
 # ── Gravação de uma sequência ─────────────────────────────────────────────────
 
-def gravar_sequencia(cap, hands, rotulo):
-    """
-    Exibe contagem regressiva e grava exatamente FRAMES_POR_GESTO frames.
-    Retorna vetor achatado (1890 valores) ou None se a mão sumir.
-    """
+def gravar_sequencia(cap, detector, rotulo):
+    """Contagem regressiva + 45 frames. Retorna vetor de 1890 valores ou None."""
+    h_frame, w_frame = None, None
+
     # Contagem regressiva
     inicio = time.time()
     while time.time() - inicio < CONTAGEM_SEG:
@@ -71,13 +134,11 @@ def gravar_sequencia(cap, hands, rotulo):
         if not ok:
             continue
         frame = cv2.flip(frame, 1)
-        h, w = frame.shape[:2]
+        h_frame, w_frame = frame.shape[:2]
 
-        result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        if result.multi_hand_landmarks:
-            mp.solutions.drawing_utils.draw_landmarks(
-                frame, result.multi_hand_landmarks[0],
-                mp.solutions.hands.HAND_CONNECTIONS)
+        pts = _detectar(detector, frame)
+        if pts:
+            _desenhar_mao(frame, pts)
 
         restante = CONTAGEM_SEG - (time.time() - inicio)
         _overlay_topo(frame,
@@ -89,26 +150,23 @@ def gravar_sequencia(cap, hands, rotulo):
 
     # Gravação dos frames
     frames_coletados = []
-    falhas = 0
+    falhas_seguidas = 0
 
     while len(frames_coletados) < FRAMES_POR_GESTO:
         ok, frame = cap.read()
         if not ok:
             continue
         frame = cv2.flip(frame, 1)
-        h, w = frame.shape[:2]
 
-        result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-
-        if result.multi_hand_landmarks:
-            hl = result.multi_hand_landmarks[0]
-            mp.solutions.drawing_utils.draw_landmarks(
-                frame, hl, mp.solutions.hands.HAND_CONNECTIONS)
-            frames_coletados.append(_pts_para_vetor(hl.landmark, h, w))
-            falhas = 0
+        pts = _detectar(detector, frame)
+        if pts:
+            _desenhar_mao(frame, pts)
+            frames_coletados.append(_pts_para_vetor(pts))
+            falhas_seguidas = 0
         else:
-            falhas += 1
-            if falhas > 15:   # mais de 15 frames seguidos sem mão → cancela
+            falhas_seguidas += 1
+            if falhas_seguidas > 15:
+                h, w = frame.shape[:2]
                 cv2.putText(frame, "MAO PERDIDA — cancelando", (60, h // 2),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 0, 255), 3)
                 cv2.imshow("Criar Palavra", frame)
@@ -158,19 +216,14 @@ def treinar_modelo():
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    _garantir_modelo_mp()
+
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("[ERRO] Webcam não encontrada.")
         return
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
-    hands = mp.solutions.hands.Hands(
-        static_image_mode=False,
-        max_num_hands=1,
-        min_detection_confidence=0.6,
-        min_tracking_confidence=0.5,
-    )
 
     print("\n=== Criação de Palavras / Gestos Dinâmicos ===")
     print(f"Cada amostra = {FRAMES_POR_GESTO} frames (~{FRAMES_POR_GESTO/30:.1f}s de gesto).")
@@ -179,47 +232,43 @@ def main():
 
     total_novas = 0
 
-    while True:
-        rotulo = input("Palavra/letra (ENTER para treinar e sair): ").strip()
-        if not rotulo:
-            break
-
-        print(f"\n  Capturando '{rotulo}'. Posicione a mão e pressione ESPAÇO.")
-        print("  ESC = voltar para menu de palavras.\n")
-
-        # Feed de espera
+    with _criar_detector() as detector:
         while True:
-            ok, frame = cap.read()
-            if not ok:
-                continue
-            frame = cv2.flip(frame, 1)
-            h, w = frame.shape[:2]
-
-            result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            if result.multi_hand_landmarks:
-                mp.solutions.drawing_utils.draw_landmarks(
-                    frame, result.multi_hand_landmarks[0],
-                    mp.solutions.hands.HAND_CONNECTIONS)
-
-            _overlay_topo(frame, f"Palavra: {rotulo}",
-                          "ESPACO = gravar 45 frames   ESC = outra palavra")
-            cv2.imshow("Criar Palavra", frame)
-            key = cv2.waitKey(1) & 0xFF
-
-            if key == 27:
+            rotulo = input("Palavra/letra (ENTER para treinar e sair): ").strip()
+            if not rotulo:
                 break
 
-            if key == ord(" "):
-                entrada = gravar_sequencia(cap, hands, rotulo)
-                if entrada:
-                    with open(ARQUIVO_DATASET, "a", newline="") as f:
-                        csv.writer(f).writerow(entrada + [rotulo])
-                    total_novas += 1
-                    print(f"  Amostra #{total_novas} salva para '{rotulo}'.")
-                else:
-                    print("  Amostra descartada (mão perdida).")
+            print(f"\n  Capturando '{rotulo}'. Posicione a mão e pressione ESPAÇO.")
+            print("  ESC = voltar para menu de palavras.\n")
 
-    hands.close()
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    continue
+                frame = cv2.flip(frame, 1)
+
+                pts = _detectar(detector, frame)
+                if pts:
+                    _desenhar_mao(frame, pts)
+
+                _overlay_topo(frame, f"Palavra: {rotulo}",
+                              "ESPACO = gravar 45 frames   ESC = outra palavra")
+                cv2.imshow("Criar Palavra", frame)
+                key = cv2.waitKey(1) & 0xFF
+
+                if key == 27:
+                    break
+
+                if key == ord(" "):
+                    entrada = gravar_sequencia(cap, detector, rotulo)
+                    if entrada:
+                        with open(ARQUIVO_DATASET, "a", newline="") as f:
+                            csv.writer(f).writerow(entrada + [rotulo])
+                        total_novas += 1
+                        print(f"  Amostra #{total_novas} salva para '{rotulo}'.")
+                    else:
+                        print("  Amostra descartada (mão perdida).")
+
     cap.release()
     cv2.destroyAllWindows()
 
